@@ -244,11 +244,3 @@ void delete_case6(struct rb_node *n)
         rotate_right(n->parent);
     }
 }
-
-
-
-
-
-
-
-    

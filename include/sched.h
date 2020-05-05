@@ -1,4 +1,3 @@
-
 #ifndef _SCHED_H
 #define _SCHED_H
 
@@ -17,28 +16,74 @@
 #define TASK_INTERRUPTIBLE			1
 #define TASK_UNINTERRUPTIBLE        3
 #define TASK_ZOMBIE				4
-
+#define NR_TASKS				64 
 #define PF_KTHREAD		            	0x00000002	//clone_flags인지 아닌지 확인
-#define offsetof(type, member) ((size_t) &((type *)0)->member)
-#define container_of(ptr, type, member) ({	\
-		const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
-		(type *)( (char *)__mptr - offsetof(type,member) );})
+#define size_t		unsigned long
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#define container_of(ptr, type, member) ({			\
+	const typeof(((type *)0)->member) * __mptr = (ptr);	\
+	(type *)((char *)__mptr - offsetof(type, member)); })
 
 #define rb_entry(ptr, type, member) container_of(ptr,type,member)
 
 
+#if NR_CPUS > 1
+#define CONFIG_SMP
+#else
+#undef CONFIG_SMP
+#endif
+
+#define NR_CPUS	1
+#define nr_cpu_ids		1U 
+#define NICE_0_LOAD	 (1L<<10)
+#define LIST_HEAD_INIT(name) { &(name), &(name) }
+
+#define INIT_TASK \
+/*cpu_context*/	{ {0,0,0,0,0,0,0,0,0,0,0,0,0}, \
+/* state etc */	INIT_SCHED_ENTITY,0,0,0,0, PF_KTHREAD \
+}
+
+
+#define INIT_SCHED_ENTITY \ 
+				{ {1024,0}, \
+				0,0,0,0,0,0,&cpu0_rq.cfs,NULL,NULL \
+}
+
+
+struct list_head {
+	struct list_head *next, *prev;
+};
+
+
+
+#define LIST_HEAD(name) \
+	struct list_head name = LIST_HEAD_INIT(name)
+
+static inline void INIT_LIST_HEAD(struct list_head *list)
+{
+    list->next = list->prev = list;
+}
+
+static inline void
+__list_add(struct list_head *entry,
+                struct list_head *prev, struct list_head *next)
+{
+    next->prev = entry;
+    entry->next = next;
+    entry->prev = prev;
+    prev->next = entry;
+}
+
+static inline void list_add(struct list_head *entry, struct list_head *head)
+{
+    __list_add(entry, head, head->next);
+}
+
+
+
 #include "rbtree.h"
 #include "types.h"
-#include "llist.h"
-
-
-
-extern const int		sched_prio_to_weight[40];
-extern struct task_struct *current;
-extern struct task_struct * task[NR_TASKS];
-extern int nr_tasks;
-
-
+//#include "llist.h"
 
 
 struct cpu_context {
@@ -56,10 +101,70 @@ struct cpu_context {
 	unsigned long sp;
 	unsigned long pc;
 };
+
 struct load_weight{
 	unsigned long weight;
 	int inv_weight;
 };
+
+struct sched_entity{
+	struct load_weight	load;
+	unsigned int		on_rq;
+	u64			vruntime;
+	u64			exec_start;
+    u64			sum_exec_runtime;
+	u64 		prev_sum_exec_runtime;
+	u64			start_runtime;
+	struct cfs_rq			*cfs_rq;
+	struct cfs_rq			*my_q;
+	struct sched_entity		*parent;
+};
+
+
+extern const int		sched_prio_to_weight[40];
+//extern struct task_struct *current;
+
+//extern int nr_tasks;
+
+struct cfs_rq {
+    struct load_weight	load;
+	unsigned long		runnable_weight;
+	unsigned int		nr_running;
+	//unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
+	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
+    
+	u64			exec_clock;
+	u64			min_vruntime;
+#ifndef CONFIG_64BIT
+	u64			min_vruntime_copy;
+#endif
+
+    struct rq		*rq;
+	struct rb_root_cached tasks_timeline;
+	struct list_head	leaf_cfs_rq_list;
+	struct task_group	*tg;	/* group that "owns" this runqueue */
+	struct sched_entity	*curr;
+	struct sched_entity	*next;
+	struct sched_entity	*last;
+	struct sched_entity	*skip;
+};
+
+
+
+extern struct list_head task_groups;
+
+struct task_group {
+	struct sched_entity	**se;
+	struct cfs_rq		**cfs_rq;
+	unsigned long		shares;
+	//struct rcu_head		rcu;
+	struct list_head	list;
+
+	struct task_group	*parent;
+	struct list_head	siblings;
+	struct list_head	children;
+};
+struct task_group root_task_group;
 
 struct rq{
 		//raw_spinlock_t		lock;
@@ -68,7 +173,7 @@ struct rq{
 		struct load_weight load;
 		unsigned long nr_load_updates;
 		u64 nr_switches ;
-
+        int     cpu;
 		struct cfs_rq cfs;
 		//struct rt_rq rt;  //실시간 런큐
 		//struct dl_rq dl;
@@ -77,8 +182,10 @@ struct rq{
 		struct task_struct *idle; 
 		struct task_struct *stop;	
 		u64			clock;
+		u64			clock_task;
 		struct list_head	cfs_tasks;	
 };
+struct rq root_rq;
 
 //#ifdef CONFIG_FAIR_GROUP_SCHED
 
@@ -96,75 +203,62 @@ static inline struct rq *rq_of(struct cfs_rq *cfs_rq)
 }
 #endif*/
 
+int scheduler_running;
 
-struct cfs_rq {
-    struct load_weight	load;
-	unsigned long		runnable_weight;
-	unsigned int		nr_running;
-	unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
-	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
-
-	u64			exec_clock;
-	u64			min_vruntime;
-#ifndef CONFIG_64BIT
-	u64			min_vruntime_copy;
-#endif
-
-//	struct rb_root_cached tasks_timeline;
-
-	/*
-	 * 'curr' points to currently running entity on this cfs_rq.
-	 * It is set to NULL otherwise (i.e when none are currently running).
-	 */
-	struct sched_entity	*curr;
-	struct sched_entity	*next;
-	struct sched_entity	*last;
-	struct sched_entity	*skip;
-};
-
-
-
-
-struct sched_entity{
-	struct load_weight	load;
-	struct rb_node	run_node;
-//	struct list_head 	group_node;
-	unsigned int		on_rq;
-	u64			exec_start;
-    u64			sum_exec_runtime;
-	u64			last_wakeup;
-	u64			avg_overlap;
-	u64			nr_migrations;
-	u64			start_runtime;
-	u64			avg_wakeup;	
-
-};
-
-struct task_struct {
-	struct cpu_context cpu_context;
-	long state;	
-	long counter;
-	long priority;
-	long preempt_count;
-	unsigned long stack;
-	unsigned long flags;
-	struct sched_entity se;
-};
 
 //extern void switch_to(struct task_struct * next, int index);
 extern void sched_init(void);
 extern void schedule(void);
-extern void timer_tick(void);
-extern void preempt_disable(void);
-extern void preempt_enable(void);
-extern void switch_to(struct task_struct * next);
+void switch_to (struct task_struct * next, struct task_struct * prev);
 extern void cpu_switch_to(struct task_struct* prev, struct task_struct* next);
 extern void exit_process(void);
+void preempt_enable(struct cfs_rq * cfs_rq );
+void preempt_disable(struct cfs_rq * cfs_rq );
+static inline struct task_struct *task_of(struct sched_entity *se);
+void timer_tick(struct cfs_rq * cfs_rq, struct sched_entity *curr);
+static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se);
+static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se);
+static void __update_inv_weight(struct load_weight *lw);
+static inline u64 mul_u64_u32_shr(u64 a, u32 mul, unsigned int shift);
+static inline u64 mul_u32_u32(u32 a, u32 b);
+static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight* lw);
+static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se);
+static u64 __sched_period(unsigned long nr_running);
+void _schedule(void);
+static void update_curr(struct cfs_rq *cfs_rq);
+static int update_min_vruntime(struct cfs_rq *cfs_rq);
+void place_entity(struct cfs_rq*cfs_rq, struct sched_entity *se, int initial);
+void set_next_entity(struct cfs_rq * cfs_rq, struct sched_entity *se);
+void init_tg_cfs_entry(struct task_group*tg, struct cfs_rq* cfs_rq, struct rq* rq, struct sched_entity *se, int cpu, struct sched_entity *parent);
+static inline void update_load_set(struct load_weight *lw, unsigned long w);
+void init_cfs_rq(struct cfs_rq *cfs_rq);
+void cpu0_init_rq(struct rq * rq);
+void init_root_task_group(struct task_group * root_task_group);
+unsigned long max_vruntime(u64 max_vruntime, u64 vruntime);
+void task_fork_fair(struct task_struct * p, int pid);
+void init_task_all(struct task_struct *task[]);
+void exit_all_process();
 
-#define INIT_TASK \
-/*cpu_context*/	{ {0,0,0,0,0,0,0,0,0,0,0,0,0}, \
-/* state etc */	0,0,1, 0, 0, PF_KTHREAD \
-}
+
+
+int tasknum;
+struct task_struct {
+	struct cpu_context cpu_context;
+    struct sched_entity se;
+	long state;	
+	long counter;
+	long preempt_count;
+    int pid;
+    unsigned long flags;
+	
+};
+//struct task_struct * task_arr[NR_TASKS];
+struct task_group root_task_group;
+struct rq cpu0_rq;
+struct task_struct * task[NR_TASKS];
+
+
 
 #endif
 #endif
+
